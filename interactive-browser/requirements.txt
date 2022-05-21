@@ -1,0 +1,14 @@
+jupyterlab
+numpy
+scipy
+pytest
+pandas
+rdkit-pypi
+scikit-learn
+gdown
+matplotlib
+scanpy
+ipywidgets
+dash
+tensorflow
+deepchem

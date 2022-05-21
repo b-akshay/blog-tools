@@ -260,13 +260,6 @@ anndata_all = sc.read('approved_drugs.h5')
 data_df = anndata_all.obs
 
 
-# Export scatterplot as HTML, and see how long it takes.
-itime = time.time()
-fig_data = run_update_scatterplot(data_df, 'MolWt')
-print("Scatter plot generated. Time: {}".format(time.time() - itime))
-fig = go.Figure(**fig_data)
-fig.write_html('scatterplot_MolWt.html')
-
 
 # ==========================================================================================================================
 # ==========================================================================================================================

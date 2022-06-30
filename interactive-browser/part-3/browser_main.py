@@ -38,7 +38,7 @@ def get_discrete_cmap(num_colors_needed):
 
 params = {}
 
-params['title'] = "Chemical space viewer"
+params['title'] = "Single-cell dataset viewer"
 
 # Can reverse black/white color scheme
 bg_scheme_list = ['black', 'white']
@@ -92,14 +92,14 @@ style_legend = {
 # Scatterplot utilities, from https://akshay.bio/blog/interactive-browser/
 # ==========================================================================================================================
 
-import numpy as np
+import numpy as np, pandas as pd
 
 """
 Returns scatterplot panel with selected points annotated, using the given dataset (in data_df) and color scheme.
 """
 def build_main_scatter(
     data_df, color_var, 
-    discrete=False, 
+    type_of_color='continuous', 
     bg_marker_size=params['bg_marker_size_factor'], marker_size=params['marker_size_factor'], 
     annotated_points=[], selected_point_ids=[], 
     highlight=False, selected_style=style_selected
@@ -131,7 +131,7 @@ def build_main_scatter(
     cumu_color_dict = {}
     
     # Check to see if color_var is continuous or discrete and plot points accordingly
-    if not discrete:     # Color_var is continuous
+    if type_of_color == 'continuous':     # Color_var is continuous
         continuous_color_var = np.array(data_df[color_var])
         spoints = np.where(np.isin(point_names, selected_point_ids))[0]
         # print(time.time() - itime, spoints, selected_point_ids)
@@ -231,17 +231,24 @@ def build_main_scatter(
     }
 
 
+def type_of_color(color_var, data_df):
+    # Anything less than 50 categories is currently considered a categorical colormap.
+    num_colors_needed = len(np.unique(data_df[color_var]))
+    ctype = 'continuous'
+    if (num_colors_needed <= 50):
+        ctype = 'discrete'
+    return ctype
+
+
 def run_update_scatterplot(
     data_df, color_var, 
     annotated_points=[],      # Selected points annotated
     selected_style=style_selected, highlighted_points=[]
 ):
     pointIDs_to_select = highlighted_points
-    num_colors_needed = len(np.unique(data_df[color_var]))
-    # Anything less than 75 categories is currently considered a categorical colormap.
-    discrete_color = (num_colors_needed <= 75)
+    discrete_color = type_of_color(color_var, data_df)
     return build_main_scatter(
-        data_df, color_var, discrete=discrete_color, 
+        data_df, color_var, type_of_color=discrete_color, 
         highlight=True, 
         bg_marker_size=params['bg_marker_size_factor'], marker_size=params['marker_size_factor'], 
         annotated_points=annotated_points, selected_point_ids=pointIDs_to_select, 
@@ -253,16 +260,48 @@ def run_update_scatterplot(
 # Heatmap utilities, mostly from https://akshay.bio/blog/interactive-browser-part-2-clustering/
 # ==========================================================================================================================
 
-#collapse-hide
+def sparse_variance(data, axis=0):
+    """
+    Input: a sparse matrix.
+    Output: variance along the selected axis.
+    """
+    sqmat = data.power(2).mean(axis=axis)
+    return np.ravel(sqmat - np.square(np.ravel(data.mean(axis=axis))))
 
-def interesting_feat_ndces(fit_data, num_feats_todisplay=500):
+
+def interesting_feat_ndces(fit_data, num_feats_todisplay=200):
     num_feats_todisplay = min(fit_data.shape[1], num_feats_todisplay)
     if ((fit_data is None) or 
         (np.prod(fit_data.shape) == 0)
        ):
         return np.arange(num_feats_todisplay)
-    feat_ndces = np.argsort(np.std(fit_data, axis=0))[::-1][:num_feats_todisplay]
+    if scipy.sparse.issparse(fit_data):
+        interestingnesses = sparse_variance(fit_data, axis=0)
+    else:
+        interestingnesses = np.std(fit_data, axis=0)
+    feat_ndces = np.argsort(interestingnesses)[::-1][:num_feats_todisplay]
     return feat_ndces
+
+
+def scale_normalize(X):
+    """
+    Normalize nonnegative ``X`` by scaling rows and columns independently.
+    Returns the normalized matrix and the row and column scaling factors.
+    """
+    row_diag = np.asarray(1.0 / np.sqrt(X.sum(axis=1))).squeeze()
+    col_diag = np.asarray(1.0 / np.sqrt(X.sum(axis=0))).squeeze()
+    row_diag[np.isinf(row_diag)] = 0
+    col_diag[np.isinf(col_diag)] = 0
+    row_diag = np.where(np.isnan(row_diag), 0, row_diag)
+    col_diag = np.where(np.isnan(col_diag), 0, col_diag)
+    if scipy.sparse.issparse(X):
+        n_rows, n_cols = X.shape
+        r = scipy.sparse.dia_matrix((row_diag, [0]), shape=(n_rows, n_rows))
+        c = scipy.sparse.dia_matrix((col_diag, [0]), shape=(n_cols, n_cols))
+        an = r * X * c
+    else:
+        an = row_diag[:, np.newaxis] * X * col_diag
+    return an, row_diag, col_diag
 
 
 from sklearn.utils.extmath import randomized_svd
@@ -322,7 +361,7 @@ def compute_coclustering(
     mode='custom'
 ):
     if num_clusters == 1:
-        num_clusters = min(fit_data.shape[0], 5)    # = (working_object.shape[1]//5)
+        num_clusters = 1 + int(np.ceil(np.log2(min(fit_data.shape[0], fit_data.shape[1])) ))
     if mode == 'sklearn':
         if scipy.sparse.issparse(fit_data):
             fit_data = fit_data.toarray()
@@ -341,8 +380,8 @@ def cocluster_core_sklearn(
     model.fit(fit_data)
     return model.row_labels_, model.column_labels_
 
-
-def custom_colwise_norm_df(data_df):
+"""
+def custom_colwise_heatmap_norm(data_df):
     # Define custom column-wise normalization here.
     data_df = data_df.iloc[:, :-8]
     for col in data_df.columns:
@@ -351,6 +390,18 @@ def custom_colwise_norm_df(data_df):
             newvals = np.nan_to_num(scipy.stats.zscore(newvals))
         data_df[col].values[:] = newvals
     return data_df
+"""
+def custom_colwise_heatmap_norm(anndata_obj):
+    # Define custom column-wise normalization here.
+    data_df = anndata_obj.obs.iloc[:, np.array(anndata_obj.obs.dtypes != 'category')]
+    new_df = {}
+    for col in data_df.columns:
+        if type_of_color(col, data_df) == 'continuous':
+            newvals = np.nan_to_num(data_df[col])
+            if np.std(newvals) > 0:
+                newvals = np.nan_to_num(scipy.stats.zscore(newvals))
+            new_df[col] = newvals
+    return pd.Dataframe(new_df)
 
 
 from sklearn.preprocessing import StandardScaler
@@ -360,9 +411,11 @@ def hm_hovertext(data, rownames, colnames):
     pt_text = []
     # First the rows, then the cols
     for r in range(data.shape[0]):
-        pt_text.append(["Observation: {}".format(str(rownames[r])) for k in data[r, :]])
+        thisrow = data[r, :]
+        pt_text.append(["Observation: {}".format(str(rownames[r])) for k in thisrow])
+        # print('pttext:', pt_text)
         for c in range(data.shape[1]):
-            pt_text[r][c] += "<br>Feature: {}<br>Value: {}".format(str(colnames[c]), str(round(data[r][c], 3)))
+            pt_text[r][c] += "<br>Feature: {}<br>Value: {}".format(str(colnames[c]), str(round(thisrow[c], 3)))
     return pt_text
 
 
@@ -375,52 +428,58 @@ def display_heatmap_cb(
     plot_raw=True, 
     max_cols_heatmap=400, 
     xaxis_label=True, yaxis_label=True, 
-    scatter_frac_domain=0.10
+    scatter_frac_domain=0.10, 
+    mode='sklearn', 
+    num_clusters=1
 ):
+    """Export heatmap as Plotly."""
     itime = time.time()
     if data_df is None or len(data_df.shape) < 2:
         return
     working_object = data_df
     
     # Identify (interesting) features to plot. Currently: high-variance ones
-    if working_object.shape[1] > 500:
-        feat_ndces = interesting_feat_ndces(working_object.values)
-        working_object = working_object.iloc[:, feat_ndces]
+    if working_object.shape[1] > 100:
+        feat_ndces = interesting_feat_ndces(working_object.X)
+        working_object = working_object[:, feat_ndces]
     
     # Here we subsample down to `max_rows_allowed` rows if needed, and make data prettier for printing
     max_rows_allowed = 1000
     if working_object.shape[0] > max_rows_allowed:
         ndxs = np.random.choice(np.arange(working_object.shape[0]), size=max_rows_allowed, replace=False)
-        working_object = working_object.iloc[ndxs, :]
+        working_object = working_object[ndxs, :]
         if row_annots is not None:
             row_annots = row_annots[ndxs]
+    working_object.X = working_object.X.toarray()
     
     # Spectral coclustering to cluster the heatmap. We always order rows (points) by spectral projection, but cols (features) can have different orderings for different viewing options.
     if (working_object.shape[0] > 1):
-        fit_data = StandardScaler().fit_transform(working_object.values)
-        ordered_rows, ordered_cols = compute_coclustering(fit_data)
+        fit_data = StandardScaler(with_mean=False).fit_transform(working_object.X)
+        ordered_rows, ordered_cols = compute_coclustering(fit_data, mode=mode, num_clusters=num_clusters)
         if row_annots is not None:
             ordered_rows = np.lexsort((ordered_rows, row_annots))
-        working_object = working_object.iloc[ordered_rows, :]
+        working_object = working_object[ordered_rows, :]
     else:
         ordered_cols = np.arange(working_object.shape[1])   # Don't reorder at all
     if col_alphabet:
         ordered_cols = np.argsort(working_object.columns)    # Order columns alphabetically by feature name
-    working_object = working_object.iloc[:, ordered_cols]
+    working_object = working_object[:, ordered_cols]
     # Finished reordering rows/cols
     
     working_object = working_object.copy()
-    hm_point_names = np.array(working_object.index)
-    absc_labels = np.array(working_object.columns)
+    hm_point_names = np.array(working_object.obs.index)
+    absc_labels = np.array(working_object.var.index)
     
     row_scat_traces = hm_row_scatter(working_object, color_var, hm_point_names)
+
     if not plot_raw:
-        working_object.values = StandardScaler().fit_transform(working_object.values)
+        working_object.X = StandardScaler(with_mean=False).fit_transform(working_object.X)
     
-    pt_text = hm_hovertext(working_object.values, hm_point_names, absc_labels)
+    working_object.X = working_object.X.toarray()
+    pt_text = hm_hovertext(working_object.X, hm_point_names, absc_labels)
     
     hm_trace = {
-        'z': working_object.values, 
+        'z': working_object.X, 
         'x': absc_labels, 
         'customdata': hm_point_names, 
         'hoverinfo': 'text',
@@ -435,7 +494,7 @@ def display_heatmap_cb(
         }, 
         'type': 'heatmap'
     }
-    max_magnitude = np.percentile(np.abs(working_object.values), 98) if working_object.shape[0] > 0 else 2
+    max_magnitude = np.percentile(np.abs(working_object.X), 98) if working_object.shape[0] > 0 else 2
     hm_trace['zmin'] = -max_magnitude
     hm_trace['zmax'] = max_magnitude
     
@@ -482,18 +541,19 @@ def display_heatmap_cb(
     }
 
 
-def hm_row_scatter(data_df, color_var, hm_point_names, num_of_category=0, bg_marker_size=params['bg_marker_size_factor']):
-    num_colors_needed = len(np.unique(data_df[color_var]))
+def hm_row_scatter(anndata_obj, color_var, hm_point_names, num_of_category=0, bg_marker_size=params['bg_marker_size_factor']):
+    df_data = anndata_obj.obs
+    num_colors_needed = len(np.unique(df_data[color_var]))
+    
     colorscale_list = get_discrete_cmap(num_colors_needed)
     row_scat_traces = []
     hmscat_mode = 'markers'
     # Decide if few enough points are around to display row labels
     if len(hm_point_names) <= 30:
         hmscat_mode = 'markers+text'
-    
     cnt = 0
-    for idx in np.unique(data_df[color_var]):
-        val = data_df.loc[data_df[color_var] == idx, :]
+    for idx in np.unique(df_data[color_var]):
+        val = df_data.loc[df_data[color_var] == idx, :]
         point_ids_this_trace = list(val.index)
         hm_point_where_this_trace = np.isin(hm_point_names, point_ids_this_trace)
         hm_point_names_this_trace = hm_point_names[hm_point_where_this_trace]
@@ -511,7 +571,7 @@ def hm_row_scatter(data_df, color_var, hm_point_names, num_of_category=0, bg_mar
             'y': y_coords_this_trace, 
             'xaxis': 'x2', 
             'hoverinfo': 'text', 
-            'text': [x + '<br>Annotation: {}'.format(str(idx)) for x in hm_point_names_this_trace], 
+            'text': [x for x in hm_point_names_this_trace], 
             'mode': hmscat_mode, 
             'textposition': 'middle left', 
             'textfont': hm_font_macro, 
@@ -537,10 +597,10 @@ import plotly.graph_objects as go
 import scanpy as sc, anndata
 import time
 
-anndata_all = sc.read('approved_drugs.h5')
+#anndata_all = sc.read('approved_drugs.h5')
+#df_data = anndata_all.obs
 
-data_df = anndata_all.obs
-
+anndata_all = sc.read('GTEx_8_tissues_snRNAseq_atlas_10k_smooth.h5')
 
 
 # ==========================================================================================================================
@@ -563,7 +623,7 @@ if running_colab:
 
 
 def create_div_mainctrl():
-    color_options = list(data_df.columns)
+    color_options = list(anndata_all.obs.columns)
     default_val = color_options[0] if len(color_options) > 0 else ' '
     
     return html.Div(
@@ -595,7 +655,18 @@ def create_div_mainctrl():
                 style={'width': '100%', 'height': 100},
             ), 
             html.Div(
-                className='six columns', 
+                id='num-selected-counter', 
+                className='three columns', 
+                children='# selected: ', 
+                style={
+                    # 'display': 'none', 
+                    'textAlign': 'center', 
+                    'color': params['font_color'], 
+                    'padding-top': '0px'
+                }
+            ), 
+            html.Div(
+                className='three columns', 
                 children=[
                     html.A(
                         html.Button(
@@ -728,18 +799,39 @@ def save_selection(landscape_data):
     return "data:text/csv;charset=utf-8," + save_contents
 
 
+@app.callback(
+    Output('num-selected-counter', 'children'), 
+    [Input('landscape-plot', 'selectedData')]
+)
+def update_numselected_counter(
+    landscape_data
+):
+    num_selected = len(get_pointIDs(landscape_data))
+    return '# selected: {}'.format(num_selected)
+
+
+@app.callback(
+    Output('landscape-plot', 'selectedData'), 
+    [Input('main-heatmap', 'selectedData')]
+)
+def update_stored_heatmap_data(hm_selection):
+    return hm_selection
+
+
 """
 Update the main scatterplot panel.
 """
 @app.callback(
     Output('landscape-plot', 'figure'), 
-    [Input('color-selection', 'value')]
+    [Input('color-selection', 'value'), 
+     Input('landscape-plot', 'selectedData')]
 )
-def update_landscape(color_var):
+def update_landscape(color_var, selected_data):
     annotated_points = []
     lscape = run_update_scatterplot(
-        data_df, 
-        color_var
+        anndata_all.obs, 
+        color_var, 
+        highlighted_points=get_pointIDs(selected_data)
     )
     return lscape
 
@@ -748,8 +840,7 @@ def update_landscape(color_var):
 Update the main heatmap panel.
 """
 @app.callback(
-    [Output('main-heatmap', 'figure'), 
-     Output('main-heatmap', 'selectedData')],
+    Output('main-heatmap', 'figure'),
     [Input('landscape-plot', 'selectedData'), 
      Input('color-selection', 'value')])
 def update_heatmap(
@@ -760,18 +851,20 @@ def update_heatmap(
         selected_IDs = [p['text'].split('<br>')[0] for p in selected_points['points']]
     else:
         selected_IDs = []
-    if len(selected_IDs) == 0:
-        selected_IDs = data_df.index
+    if len(selected_IDs) == 0:    # If no observations are selected, try to render all of them
+        selected_IDs = anndata_all.obs.index
     
-    subsetted_data = data_df.loc[np.array(selected_IDs)]
-    subsetted_data = custom_colwise_norm_df(subsetted_data)
+    subsetted_data = anndata_all[np.array(selected_IDs), :]
+    
+    #subsetted_data = custom_colwise_heatmap_norm(subsetted_data)
     row_annotations = None
     heatmap_fig = display_heatmap_cb(
         subsetted_data, color_var, 
         row_annots=row_annotations, 
-        xaxis_label=True, yaxis_label=True
+        xaxis_label=True, yaxis_label=True, 
+        col_alphabet=False, mode='sklearn'
     )
-    return heatmap_fig, selected_points
+    return heatmap_fig
 
 
 

@@ -64,7 +64,6 @@ def label_propagation(
     dw_invsqrt = scipy.sparse.diags(
         np.reciprocal(np.sqrt(np.ravel(adj_mat.sum(axis=0))))
     )
-    itime = time.time()
     R = dw_invsqrt.dot(adj_mat).dot(dw_invsqrt)
     F = labeled_signal.copy()
     if scipy.sparse.issparse(F):

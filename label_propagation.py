@@ -1,3 +1,9 @@
+"""
+Implements label propagation and related methods, as described in: 
+- https://akshay.bio/blog/graph-prediction-diffusion/
+"""
+
+
 import numpy as np, scipy
 
 
